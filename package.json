@@ -1,0 +1,12 @@
+{
+  "name": "roblox-clothing-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that fetches 2D Roblox clothing templates",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3"
+  }
+}
