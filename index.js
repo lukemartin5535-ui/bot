@@ -5,10 +5,15 @@ const { URL } = require("url");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-const OWNER_ID = process.env.OWNER_ID; // Your Discord user ID for DM alerts
+const OWNER_ID = process.env.OWNER_ID;
+
+// Health check interval in milliseconds (default: every 3 hours)
+const HEALTH_CHECK_INTERVAL = 3 * 60 * 60 * 1000;
+
+// A known public Roblox asset ID used for health checks (Roblox classic shirt)
+const HEALTH_CHECK_ASSET_ID = "7091086240";
 
 // ─── COOKIE POOL ─────────────────────────────────────────────────────────────
-// Load all ROBLOSECURITY_1, ROBLOSECURITY_2, ... from env, or fall back to ROBLOSECURITY
 const cookiePool = [];
 let i = 1;
 while (process.env[`ROBLOSECURITY_${i}`]) {
@@ -33,32 +38,60 @@ async function markCookieDead(entry) {
   if (entry.dead) return;
   entry.dead = true;
   console.warn(`Cookie #${entry.index} has expired or is invalid.`);
+  await sendOwnerDM(
+    `⚠️ **Cookie Alert:** \`ROBLOSECURITY_${entry.index}\` has expired or been flagged.\n` +
+    `Please update it in your Railway environment variables and redeploy.\n\n` +
+    `Live cookies remaining: **${cookiePool.filter((c) => !c.dead).length}/${cookiePool.length}**`
+  );
+  if (cookiePool.filter((c) => !c.dead).length === 0) {
+    await sendOwnerDM(
+      `🚨 **URGENT: All cookies are dead.** The bot cannot fetch any assets until you refresh the cookies in Railway.`
+    );
+  }
+}
 
-  // DM the bot owner
-  if (OWNER_ID) {
+async function sendOwnerDM(message) {
+  if (!OWNER_ID) return;
+  try {
+    const owner = await client.users.fetch(OWNER_ID);
+    await owner.send(message);
+  } catch (err) {
+    console.error("Could not DM owner:", err.message);
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── HEALTH CHECK ────────────────────────────────────────────────────────────
+async function runHealthCheck() {
+  console.log(`[Health Check] Running at ${new Date().toISOString()}`);
+  let anyFailed = false;
+
+  for (const entry of cookiePool) {
+    if (entry.dead) continue;
+
     try {
-      const owner = await client.users.fetch(OWNER_ID);
-      await owner.send(
-        `⚠️ **Cookie Alert:** \`ROBLOSECURITY_${entry.index}\` has expired or been flagged.\n` +
-        `Please update it in your Railway environment variables and redeploy.\n\n` +
-        `Live cookies remaining: **${cookiePool.filter((c) => !c.dead).length}/${cookiePool.length}**`
+      const res = await fetchUrl(
+        `https://assetdelivery.roblox.com/v1/asset/?id=${HEALTH_CHECK_ASSET_ID}`,
+        entry.cookie
       );
+
+      if (res.status === 401 || res.status === 403) {
+        console.warn(`[Health Check] Cookie #${entry.index} failed with HTTP ${res.status}`);
+        await markCookieDead(entry);
+        anyFailed = true;
+      } else if (res.status !== 200) {
+        // Non-auth error, could be temporary — log but don't mark dead
+        console.warn(`[Health Check] Cookie #${entry.index} returned HTTP ${res.status} — may be temporary`);
+      } else {
+        console.log(`[Health Check] Cookie #${entry.index} OK`);
+      }
     } catch (err) {
-      console.error("Could not DM owner:", err.message);
+      console.error(`[Health Check] Cookie #${entry.index} threw error:`, err.message);
     }
   }
 
-  // If ALL cookies are dead, DM owner urgently
-  const live = cookiePool.filter((c) => !c.dead);
-  if (live.length === 0 && OWNER_ID) {
-    try {
-      const owner = await client.users.fetch(OWNER_ID);
-      await owner.send(
-        `🚨 **URGENT: All cookies are dead.** The bot cannot fetch any assets until you refresh the cookies in Railway.`
-      );
-    } catch (err) {
-      console.error("Could not DM owner:", err.message);
-    }
+  if (!anyFailed) {
+    console.log(`[Health Check] All cookies healthy (${cookiePool.filter((c) => !c.dead).length}/${cookiePool.length} live)`);
   }
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,7 +203,6 @@ async function fetchWithCookie(url) {
 
   if (res.status === 401 || res.status === 403) {
     await markCookieDead(entry);
-    // Retry with next live cookie
     return fetchWithCookie(url);
   }
 
@@ -178,7 +210,6 @@ async function fetchWithCookie(url) {
 }
 
 async function getAsset(assetId) {
-  // 1. Get asset details (no auth needed)
   const details = await fetchJson(
     `https://economy.roblox.com/v2/assets/${assetId}/details`
   );
@@ -189,10 +220,9 @@ async function getAsset(assetId) {
   const itemName = details.Name || `Asset ${assetId}`;
 
   if (cookiePool.length === 0) {
-    throw new Error("No ROBLOSECURITY cookies configured. See README for setup instructions.");
+    throw new Error("No ROBLOSECURITY cookies configured.");
   }
 
-  // 2. Fetch the raw asset using the cookie pool
   const assetRes = await fetchWithCookie(
     `https://assetdelivery.roblox.com/v1/asset/?id=${assetId}`
   );
@@ -204,7 +234,6 @@ async function getAsset(assetId) {
   const body = assetRes.body;
   const bodyText = body.toString("utf8");
 
-  // 3. Classic clothing: parse XML to get texture image ID, return PNG
   if (CLASSIC_CLOTHING_TYPES.has(typeId)) {
     let match = bodyText.match(/rbxassetid:\/\/(\d+)/i);
     if (!match) match = bodyText.match(/<url>\s*(\d+)\s*<\/url>/i);
@@ -234,7 +263,6 @@ async function getAsset(assetId) {
     };
   }
 
-  // 4. Everything else: return raw .rbxm file
   return {
     buffer: body,
     filename: `${itemName.replace(/[^a-zA-Z0-9_\-]/g, "_")}-${assetId}.rbxm`,
@@ -254,17 +282,17 @@ client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
   const live = cookiePool.filter((c) => !c.dead).length;
   console.log(`Cookie pool: ${live}/${cookiePool.length} cookies loaded.`);
-  if (cookiePool.length === 0) {
-    console.warn("WARNING: No ROBLOSECURITY cookies found in environment variables.");
-  }
-  if (!OWNER_ID) {
-    console.warn("WARNING: OWNER_ID not set. Cookie expiry alerts will not be sent.");
-  }
+  if (cookiePool.length === 0) console.warn("WARNING: No ROBLOSECURITY cookies found.");
+  if (!OWNER_ID) console.warn("WARNING: OWNER_ID not set. Cookie alerts will not be sent.");
+
+  // Run health check immediately on startup, then every HEALTH_CHECK_INTERVAL
+  runHealthCheck();
+  setInterval(runHealthCheck, HEALTH_CHECK_INTERVAL);
 });
 
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== "get") return;
+  if (interaction.commandName !== "asset") return;
 
   await interaction.deferReply();
 

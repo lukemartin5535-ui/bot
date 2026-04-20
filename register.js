@@ -15,8 +15,8 @@ if (!TOKEN || !CLIENT_ID) {
 
 const commands = [
   new SlashCommandBuilder()
-    .setName("get")
-    .setDescription("Fetch the 2D template of a Roblox clothing item")
+    .setName("asset")
+    .setDescription("Fetch the template or model file of any Roblox asset")
     .addStringOption((opt) =>
       opt
         .setName("item")
